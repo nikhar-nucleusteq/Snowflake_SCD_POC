@@ -1,0 +1,471 @@
+POC SCD1
+
+CREATE OR REPLACE DATABASE POC_SCD1;
+
+USE DATABASE POC_SCD1;
+
+CREATE OR REPLACE TABLE employees (
+    id INT,
+    name VARCHAR,
+    email VARCHAR,
+    phone_number VARCHAR,
+    city VARCHAR,
+    state VARCHAR,
+    zip_code VARCHAR
+);
+
+SELECT * from employees;
+
+CREATE OR REPLACE STREAM employees_stream ON TABLE employees;
+
+SELECT * from employees_stream;
+
+CREATE OR REPLACE TABLE employees_target_scd1 (
+    id INT,
+    name VARCHAR,
+    email VARCHAR,
+    phone_number VARCHAR,
+    city VARCHAR,
+    state VARCHAR,
+    zip_code VARCHAR
+) as SELECT * from employees;
+
+CREATE OR REPLACE PROCEDURE update_employees_target()
+  RETURNS STRING
+  LANGUAGE JAVASCRIPT
+  EXECUTE AS CALLER
+  AS
+  $$
+  var stmt = snowflake.createStatement({
+    sqlText: `MERGE INTO employees_target_scd1 AS target
+              USING (
+                -- Creating a temporary table from the source employees table with only rank 1 records
+                            SELECT id,
+                                   name,
+                                   email,
+                                   phone_number,
+                                   city,
+                                   state,
+                                   zip_code
+                            FROM employees_stream
+                        WHERE METADATA$ACTION = 'INSERT') AS source
+              ON target.id = source.id
+              WHEN MATCHED THEN
+                UPDATE SET
+                  target.name = source.name,
+                  target.email = source.email,
+                  target.phone_number = source.phone_number,
+                  target.city = source.city,
+                  target.state = source.state,
+                  target.zip_code = source.zip_code
+              WHEN NOT MATCHED THEN
+                INSERT (id, name, email, phone_number, city, state, zip_code)
+                VALUES (source.id, source.name, source.email, source.phone_number, source.city, source.state, source.zip_code);`
+  });
+  
+  var result = stmt.execute();
+  return 'SCD Type 1 update completed successfully.';
+  $$;
+
+SELECT * from employees_target_scd1;
+
+SELECT * from employees_stream;
+
+UPDATE employees SET email = 'nikhar.jain@nucleusteq.com'
+where id  = 11;
+
+CALL update_employees_target();
+
+SELECT count(*) from employees_target_scd1;
+
+CREATE OR REPLACE TASK update_employees_task
+  WAREHOUSE = 'COMPUTE_WH'
+  SCHEDULE = '60 MINUTE'
+  WHEN
+    SYSTEM$STREAM_HAS_DATA('STUDENTS_STREAM')
+  AS
+  CALL update_students_target();
+
+ALTER TASK update_employees_task RESUME;
+
+DROP table employees_target_scd1;
+
+INSERT INTO employees (id, name, email, phone_number, city, state, zip_code)
+VALUES (11, 'Nikhar Jain', 'nikhar.jain@example.com', '123-456-7890', 'Indore', 'MP', '452016');
+
+----SCD2----
+
+-- Creating the target table for SCD Type 2
+CREATE OR REPLACE TABLE employees_target_scd2 (
+    id INT,
+    name VARCHAR,
+    email VARCHAR,
+    phone_number VARCHAR,
+    city VARCHAR,
+    state VARCHAR,
+    zip_code VARCHAR,
+    current_flag BOOLEAN DEFAULT TRUE,
+    valid_from DATE DEFAULT CURRENT_DATE(),
+    end_date DATE DEFAULT TO_DATE('9999-12-31')
+);
+
+Select * from employees_target_scd2;
+
+-- Inserting initial records into target table
+INSERT INTO employees_target_scd2 (id, name, email, phone_number, city, state, zip_code)
+SELECT id, name, email, phone_number, city, state, zip_code
+FROM employees;
+
+-- Creating the stream for capturing changes from the source table
+CREATE OR REPLACE STREAM employees_stream2 ON TABLE employees;
+
+-- Implementing SCD Type 2 updates in the target table
+CREATE OR REPLACE PROCEDURE update_employees_target_scd2()
+  RETURNS STRING
+  LANGUAGE JAVASCRIPT
+  EXECUTE AS CALLER
+  AS
+  $$
+
+  snowflake.execute({
+    sqlText: `
+      CREATE OR REPLACE TEMPORARY TABLE employees_temp AS
+      SELECT id,
+             name,
+             email,
+             phone_number,
+             city,
+             state,
+             zip_code
+      FROM employees_stream2
+      WHERE METADATA$ACTION = 'INSERT';`
+  });
+
+    snowflake.execute({
+        sqlText: `UPDATE employees_target_scd2 AS tgt
+            SET current_flag = FALSE,
+                end_date = CURRENT_DATE()
+            FROM employees_temp AS src
+            WHERE tgt.id = src.id
+            AND tgt.current_flag = TRUE
+            AND tgt.id IS NOT NULL
+            AND (tgt.name != src.name OR
+                 tgt.email != src.email OR
+                 tgt.phone_number != src.phone_number OR
+                 tgt.city != src.city OR
+                 tgt.state != src.state OR
+                 tgt.zip_code != src.zip_code)`
+                });
+                
+     snowflake.execute({
+        sqlText: `INSERT INTO employees_target_scd2 (id, name, email, phone_number, city, state, zip_code, valid_from)
+SELECT id, name, email, phone_number, city, state, zip_code, CURRENT_DATE() FROM employees_temp`
+                });
+
+     snowflake.execute({
+        sqlText: `INSERT INTO employees_target_scd2 (id, name, email, phone_number, city, state, zip_code, valid_from)
+SELECT id, name, email, phone_number, city, state, zip_code, CURRENT_DATE() FROM employees_temp AS src
+WHERE src.id NOT IN (SELECT id FROM employees_target_scd2 WHERE current_flag = TRUE)`
+                });
+                
+  return 'SCD Type 2 update completed successfully.';
+  $$;
+
+  -- For testing
+INSERT INTO employees (id, name, email, phone_number, city, state, zip_code)
+VALUES (11, 'Nikhar Jain', 'nikhar@example.com', '123-456-7890', 'Indore', 'MP', '452016');
+
+INSERT INTO employees (id, name, email, phone_number, city, state, zip_code)
+VALUES (12, 'Sovan Panda', 'sovan.pada@example.com', '123-456-7890', 'BLR', 'KA', '530068');
+
+INSERT INTO employees (id, name, email, phone_number, city, state, zip_code)
+VALUES (13, 'Abc', 'Abc@example.com', '123-456-7890', 'BLR', 'KA', '530069');
+
+UPDATE employees SET email = 'nikhar.jain@nucleusteq.com'
+where id  = 11;
+
+UPDATE employees SET email = 'sovan.panda@nucleusteq.com', zip_code = 530069
+where id  = 12;
+
+UPDATE employees SET email = 'abc@nucleusteq.com'
+where id  = 13;
+
+Select * from employees;
+
+Select * from employees_target_scd2;
+
+Select * from employees_stream2;
+
+CALL update_employees_target_scd2();
+
+CREATE OR REPLACE TASK update_employees_target_scd2_task
+  WAREHOUSE = 'COMPUTE_WH'
+  SCHEDULE = '60 MINUTE'
+  WHEN
+    SYSTEM$STREAM_HAS_DATA('employees_stream2')
+  AS
+  CALL update_employees_target_scd2();
+
+ALTER TASK update_employees_target_scd2_task RESUME;
+
+-- DELETE FROM employees where id in (11,12,13);
+
+
+-----------------------------
+
+CREATE OR REPLACE DATABASE POC_SCD1;
+
+USE DATABASE POC_SCD1;
+
+CREATE OR REPLACE TABLE employees (
+    id INT,
+    name VARCHAR,
+    email VARCHAR,
+    phone_number VARCHAR,
+    city VARCHAR,
+    state VARCHAR,
+    zip_code VARCHAR
+);
+
+SELECT * from employees;
+
+CREATE OR REPLACE STREAM employees_stream ON TABLE employees;
+
+SELECT * from employees_stream;
+
+CREATE OR REPLACE TABLE employees_target_scd1 (
+    id INT,
+    name VARCHAR,
+    email VARCHAR,
+    phone_number VARCHAR,
+    city VARCHAR,
+    state VARCHAR,
+    zip_code VARCHAR
+) 
+as SELECT * from employees;
+
+CREATE OR REPLACE PROCEDURE update_employees_target()
+  RETURNS STRING
+  LANGUAGE JAVASCRIPT
+  EXECUTE AS CALLER
+  AS
+  $$
+  var stmt = snowflake.createStatement({
+    sqlText: `MERGE INTO employees_target_scd1 AS target
+              USING (
+                -- Creating a temporary table from the source employees table with only rank 1 records
+                            SELECT id,
+                                   name,
+                                   email,
+                                   phone_number,
+                                   city,
+                                   state,
+                                   zip_code
+                            FROM employees_stream
+                        WHERE METADATA$ACTION = 'INSERT') AS source
+              ON target.id = source.id
+              WHEN MATCHED THEN
+                UPDATE SET
+                  target.name = source.name,
+                  target.email = source.email,
+                  target.phone_number = source.phone_number,
+                  target.city = source.city,
+                  target.state = source.state,
+                  target.zip_code = source.zip_code
+              WHEN NOT MATCHED THEN
+                INSERT (id, name, email, phone_number, city, state, zip_code)
+                VALUES (source.id, source.name, source.email, source.phone_number, source.city, source.state, source.zip_code);`
+  });
+  
+  var result = stmt.execute();
+  return 'SCD Type 1 update completed successfully.';
+  $$;
+
+SELECT * from employees_target_scd1;
+
+SELECT * from employees_stream;
+
+UPDATE employees SET email = 'nikhar.jain@nucleusteq.com'b
+where id  = 11;
+
+UPDATE employees SET email = 'johndoe@email.com'
+where id  = 1;
+
+CALL update_employees_target();
+
+SELECT count(*) from employees_target_scd1;
+
+CREATE OR REPLACE TASK update_employees_task
+  WAREHOUSE = 'COMPUTE_WH'
+  SCHEDULE = '60 MINUTE'
+  WHEN
+    SYSTEM$STREAM_HAS_DATA('STUDENTS_STREAM')
+  AS
+  CALL update_students_target();
+
+ALTER TASK update_employees_task RESUME;
+
+DROP table employees_target_scd1;
+
+INSERT INTO employees (id, name, email, phone_number, city, state, zip_code)
+VALUES (11, 'Nikhar Jain', 'nikhar.jain@example.com', '123-456-7890', 'Indore', 'MP', '452016');
+
+----SCD2----
+
+-- Creating the target table for SCD Type 2
+CREATE OR REPLACE TABLE employees_target_scd2 (
+    id INT,
+    name VARCHAR,
+    email VARCHAR,
+    phone_number VARCHAR,
+    city VARCHAR,
+    state VARCHAR,
+    zip_code VARCHAR,
+    current_flag BOOLEAN DEFAULT TRUE,
+    valid_from DATE DEFAULT CURRENT_DATE(),
+    end_date DATE DEFAULT TO_DATE('9999-12-31')
+);
+
+Select * from employees_target_scd2;
+
+-- Inserting initial records into target table
+INSERT INTO employees_target_scd2 (id, name, email, phone_number, city, state, zip_code)
+SELECT id, name, email, phone_number, city, state, zip_code
+FROM employees;
+
+-- Creating the stream for capturing changes from the source table
+CREATE OR REPLACE STREAM employees_stream2 ON TABLE employees;
+
+-- Implementing SCD Type 2 updates in the target table
+CREATE OR REPLACE PROCEDURE update_employees_target_scd2()
+  RETURNS STRING
+  LANGUAGE JAVASCRIPT
+  EXECUTE AS CALLER
+  AS
+  $$
+
+  snowflake.execute({ sqlText: 'BEGIN TRANSACTION;' });
+  
+  snowflake.execute({
+    sqlText: `
+      CREATE OR REPLACE TEMPORARY TABLE employees_temp AS
+      SELECT id,
+             name,
+             email,
+             phone_number,
+             city,
+             state,
+             zip_code
+      FROM employees_stream2
+      WHERE METADATA$ACTION = 'INSERT';`
+  });
+
+    snowflake.execute({
+        sqlText: `UPDATE employees_target_scd2 AS tgt
+            SET current_flag = FALSE,
+                end_date = CURRENT_DATE()
+            FROM employees_temp AS src
+            WHERE tgt.id = src.id
+            AND tgt.current_flag = TRUE
+            AND tgt.id IS NOT NULL
+            AND (tgt.name != src.name OR
+                 tgt.email != src.email OR
+                 tgt.phone_number != src.phone_number OR
+                 tgt.city != src.city OR
+                 tgt.state != src.state OR
+                 tgt.zip_code != src.zip_code)`
+                });
+                
+     snowflake.execute({
+        sqlText: `INSERT INTO employees_target_scd2 (id, name, email, phone_number, city, state, zip_code, valid_from)
+SELECT id, name, email, phone_number, city, state, zip_code, CURRENT_DATE() FROM employees_temp`
+                });
+
+     snowflake.execute({
+        sqlText: `INSERT INTO employees_target_scd2 (id, name, email, phone_number, city, state, zip_code, valid_from)
+SELECT id, name, email, phone_number, city, state, zip_code, CURRENT_DATE() FROM employees_temp AS src
+WHERE src.id NOT IN (SELECT id FROM employees_target_scd2 WHERE current_flag = TRUE)`
+                });
+                
+  snowflake.execute({ sqlText: 'COMMIT;' });
+
+  return 'SCD Type 2 update completed successfully.';
+  $$;
+
+  -- For testing
+INSERT INTO employees (id, name, email, phone_number, city, state, zip_code)
+VALUES (11, 'Nikhar Jain', 'nikhar@example.com', '123-456-7890', 'Indore', 'MP', '452016');
+
+INSERT INTO employees (id, name, email, phone_number, city, state, zip_code)
+VALUES (12, 'Sovan Panda', 'sovan.pada@example.com', '123-456-7890', 'BLR', 'KA', '530068');
+
+INSERT INTO employees (id, name, email, phone_number, city, state, zip_code)
+VALUES (13, 'Abc', 'Abc@example.com', '123-456-7890', 'BLR', 'KA', '530069');
+
+UPDATE employees SET email = 'nikhar.jain@nucleusteq.com'
+where id  = 11;
+
+UPDATE employees SET email = 'sovan.panda@nucleusteq.com', zip_code = 530069
+where id  = 12;
+
+UPDATE employees SET email = 'abc@nucleusteq.com'
+where id  = 13;
+
+Select * from employees;
+
+Select * from employees_target_scd2;
+
+Select * from employees_stream2;
+
+CALL update_employees_target_scd2();
+
+CREATE OR REPLACE TASK update_employees_target_scd2_task
+  WAREHOUSE = 'COMPUTE_WH'
+  SCHEDULE = '60 MINUTE'
+  WHEN
+    SYSTEM$STREAM_HAS_DATA('employees_stream2')
+  AS
+  CALL update_employees_target_scd2();
+
+ALTER TASK update_employees_target_scd2_task RESUME;
+
+-- DELETE FROM employees where id in (11,12,13);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

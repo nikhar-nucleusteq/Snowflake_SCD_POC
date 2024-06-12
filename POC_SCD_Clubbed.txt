@@ -1,0 +1,185 @@
+CREATE OR REPLACE DATABASE POC_SCD1;
+
+USE DATABASE POC_SCD1;
+
+CREATE OR REPLACE TABLE employees_target_scd1clubbed (
+    id INT,
+    name VARCHAR,
+    email VARCHAR,
+    phone_number VARCHAR,
+    city VARCHAR,
+    state VARCHAR,
+    zip_code VARCHAR
+) as SELECT * from employees;
+
+Select * from employees_target_scd1clubbed;
+
+CREATE OR REPLACE PROCEDURE update_employees_target_clubbed()
+  RETURNS STRING
+  LANGUAGE JAVASCRIPT
+  EXECUTE AS CALLER
+  AS
+  $$
+  var stmt = snowflake.createStatement({
+    sqlText: `MERGE INTO employees_target_scd1clubbed AS target
+              USING (
+                            SELECT id,
+                                   name,
+                                   email,
+                                   phone_number,
+                                   city,
+                                   state,
+                                   zip_code
+                            FROM employees_target_scd2
+                        WHERE CURRENT_FLAG = TRUE) AS source
+              ON target.id = source.id
+              WHEN MATCHED THEN
+                UPDATE SET
+                  target.name = source.name,
+                  target.email = source.email,
+                  target.phone_number = source.phone_number,
+                  target.city = source.city,
+                  target.state = source.state,
+                  target.zip_code = source.zip_code
+              WHEN NOT MATCHED THEN
+                INSERT (id, name, email, phone_number, city, state, zip_code)
+                VALUES (source.id, source.name, source.email, source.phone_number, source.city, source.state, source.zip_code);`
+  });
+  
+  var result = stmt.execute();
+  return 'SCD Clubbed update completed successfully.';
+  $$;
+
+  CALL update_employees_target_clubbed();
+
+  ---- Creating dependent task ----
+
+  ALTER TASK update_employees_target_scd2_task SUSPEND;
+  
+  CREATE OR REPLACE TASK update_employees_target_clubbed_task
+  WAREHOUSE = 'COMPUTE_WH'
+  AFTER update_employees_target_scd2_task
+  AS
+  CALL update_employees_target_clubbed();
+
+ALTER TASK update_employees_target_clubbed_task RESUME;
+
+----------------------------------------------------
+
+CREATE OR REPLACE DATABASE POC_SCD1;
+
+USE DATABASE POC_SCD1;
+
+CREATE OR REPLACE TABLE employees_target_scd1 (
+    id INT,
+    name VARCHAR,
+    email VARCHAR,
+    phone_number VARCHAR,
+    city VARCHAR,
+    state VARCHAR,
+    zip_code VARCHAR
+) as SELECT * from employees;
+
+Select * from employees_target_scd1;
+
+CREATE OR REPLACE PROCEDURE update_employees_target_clubbed()
+  RETURNS STRING
+  LANGUAGE JAVASCRIPT
+  EXECUTE AS CALLER
+  AS
+  $$
+
+  snowflake.execute({ sqlText: 'BEGIN TRANSACTION;' });
+
+  
+  var stmt = snowflake.createStatement({
+    sqlText: `MERGE INTO employees_target_scd1 AS target
+              USING (
+                            SELECT id,
+                                   name,
+                                   email,
+                                   phone_number,
+                                   city,
+                                   state,
+                                   zip_code
+                            FROM employees_target_scd2
+                        WHERE CURRENT_FLAG = TRUE) AS source
+              ON target.id = source.id
+              WHEN MATCHED THEN
+                UPDATE SET
+                  target.name = source.name,
+                  target.email = source.email,
+                  target.phone_number = source.phone_number,
+                  target.city = source.city,
+                  target.state = source.state,
+                  target.zip_code = source.zip_code
+              WHEN NOT MATCHED THEN
+                INSERT (id, name, email, phone_number, city, state, zip_code)
+                VALUES (source.id, source.name, source.email, source.phone_number, source.city, source.state, source.zip_code);`
+  });
+  
+  var result = stmt.execute();
+
+  snowflake.execute({ sqlText: 'COMMIT;' });
+  
+  return 'SCD Clubbed update completed successfully.';
+  $$;
+
+  CALL update_employees_target_clubbed();
+
+  ---- Creating dependent task ----
+
+  ALTER TASK update_employees_target_scd2_task SUSPEND;
+  
+  CREATE OR REPLACE TASK update_employees_target_clubbed_task
+  WAREHOUSE = 'COMPUTE_WH'
+  AFTER update_employees_target_scd2_task
+  AS
+  CALL update_employees_target_clubbed();
+
+ALTER TASK update_employees_target_clubbed_task RESUME;
+
+
+CREATE STAGE IF NOT EXISTS AF_POC_Stage FILE_FORMAT = (TYPE = 'CSV');
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
